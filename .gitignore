@@ -14,6 +14,8 @@ captures/
 *.jks
 *.keystore
 release.keystore
+signing/
+keystore.properties
 
 # APK outputs (built artifacts — distribute via releases, not git)
 *.apk
