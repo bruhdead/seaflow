@@ -1,0 +1,29 @@
+# Android / Gradle
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.idea/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing / keystores
+*.jks
+*.keystore
+release.keystore
+
+# APK outputs (built artifacts — distribute via releases, not git)
+*.apk
+*.aab
+*.aar
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
