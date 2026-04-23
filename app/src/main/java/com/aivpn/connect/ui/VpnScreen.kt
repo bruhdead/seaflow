@@ -34,6 +34,7 @@ data class VpnUiState(
     val downloadBytes: Long = 0L,
     val connectionKey: String = "",
     val timerSeconds: Long = 0L,
+    val needsBatteryExemption: Boolean = false,
 )
 
 @Composable
@@ -43,6 +44,7 @@ fun VpnScreen(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onOpenLogs: () -> Unit = {},
+    onRequestBatteryExemption: () -> Unit = {},
 ) {
     Box(
         modifier = Modifier
@@ -75,7 +77,13 @@ fun VpnScreen(
                 letterSpacing = 6.sp,
             )
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(16.dp))
+
+            // Battery-optimization warning banner — shown until the user exempts Seaflow
+            if (state.needsBatteryExemption) {
+                BatteryOptBanner(onAllow = onRequestBatteryExemption)
+                Spacer(Modifier.height(12.dp))
+            }
 
             // Connection status orb
             ConnectionOrb(state.connected, state.connecting)
@@ -197,6 +205,48 @@ fun VpnScreen(
             }
 
             Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun BatteryOptBanner(onAllow: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(NeonPink.copy(alpha = 0.08f))
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Default.BatteryAlert,
+            contentDescription = null,
+            tint = NeonPink,
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Фон отключён",
+                color = StarWhite,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "VPN может засыпать при блокировке экрана",
+                color = DimStar,
+                fontSize = 11.sp,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Button(
+            onClick = onAllow,
+            colors = ButtonDefaults.buttonColors(containerColor = NeonPink),
+            shape = RoundedCornerShape(10.dp),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+        ) {
+            Text("РАЗРЕШИТЬ", fontSize = 11.sp, letterSpacing = 1.sp)
         }
     }
 }

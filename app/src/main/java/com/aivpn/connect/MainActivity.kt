@@ -1,8 +1,13 @@
 package com.aivpn.connect
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import com.aivpn.connect.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -52,7 +57,10 @@ class MainActivity : ComponentActivity() {
         // Load saved key
         val prefs = getSharedPreferences("aivpn_connect", MODE_PRIVATE)
         val savedKey = prefs.getString("connection_key", "") ?: ""
-        uiState = uiState.copy(connectionKey = savedKey)
+        uiState = uiState.copy(
+            connectionKey = savedKey,
+            needsBatteryExemption = !isBatteryExempted(),
+        )
 
         // Restore state if service is running
         if (VpnService.isRunning) {
@@ -77,6 +85,7 @@ class MainActivity : ComponentActivity() {
                         onConnect = { connect() },
                         onDisconnect = { disconnect() },
                         onOpenLogs = { logsOpen = true },
+                        onRequestBatteryExemption = { requestBatteryExemption() },
                     )
                 }
             }
@@ -121,6 +130,34 @@ class MainActivity : ComponentActivity() {
         if (VpnService.isRunning && connectionStartTime == 0L) {
             connectionStartTime = System.currentTimeMillis()
             startTimer()
+        }
+
+        // Refresh battery-optimization exemption state (may have changed in Settings)
+        uiState = uiState.copy(needsBatteryExemption = !isBatteryExempted())
+    }
+
+    private fun isBatteryExempted(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /** Open the system dialog asking to exempt the app from battery optimizations. */
+    @Suppress("BatteryLife")
+    private fun requestBatteryExemption() {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            // OEM variants (OnePlus/ColorOS, Xiaomi) sometimes block the direct action —
+            // fall back to the general battery-optimization list.
+            Log.w(TAG, "requestBatteryExemption: direct intent failed (${e.message}); opening settings list")
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (e2: Exception) {
+                Toast.makeText(this, "Открой Настройки → Батарея → Seaflow вручную", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
