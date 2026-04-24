@@ -22,6 +22,12 @@ server/peer/config.json
 server/peer/seaflow-peer
 server/peer/seaflow-peer.exe
 
+# Wrangler local cache
+signaling/.wrangler/
+signaling/node_modules/
+signaling/package.json
+signaling/package-lock.json
+
 # APK outputs (built artifacts — distribute via releases, not git)
 *.apk
 *.aab
