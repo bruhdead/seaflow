@@ -66,12 +66,29 @@ class WebRtcTunnel(
                 .createInitializationOptions()
             PeerConnectionFactory.initialize(opts)
             eglBase = EglBase.create()
+
+            // Ignore VPN-typed interfaces when enumerating local ICE candidates.
+            // Once our own VpnService.establish() adds tun0, libwebrtc's NetworkMonitor
+            // otherwise tries to include it in the candidate pool — which sends
+            // traffic back into our own tunnel, creating a recursive loop that
+            // kills STUN consent freshness checks after ~5-6 s.
+            //
+            // ADAPTER_TYPE bitmask values (from //rtc_base/network_constants.h):
+            //   UNKNOWN=0, ETHERNET=1, WIFI=2, CELLULAR=4, VPN=8, LOOPBACK=16,
+            //   ANY=32, CELLULAR_2G=64, CELLULAR_3G=128, CELLULAR_4G=256,
+            //   CELLULAR_5G=512
+            // Ignore VPN (8) + LOOPBACK (16).
+            val factoryOptions = PeerConnectionFactory.Options().apply {
+                networkIgnoreMask = 8 or 16
+            }
+
             factory = PeerConnectionFactory.builder()
+                .setOptions(factoryOptions)
                 .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true))
                 .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase.eglBaseContext))
                 .createPeerConnectionFactory()
             factoryInitialized = true
-            Log.d(TAG, "PeerConnectionFactory initialized")
+            Log.d(TAG, "PeerConnectionFactory initialized (networkIgnoreMask=VPN+LOOPBACK)")
         }
     }
 
