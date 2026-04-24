@@ -17,6 +17,8 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RTCStatsCollectorCallback
+import org.webrtc.RTCStatsReport
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import java.io.FileDescriptor
@@ -53,6 +55,10 @@ class WebRtcTunnel(
         private const val HANDSHAKE_TIMEOUT_MS = 20_000L
         private const val KEEPALIVE_INTERVAL_MS = 15_000L
         private const val REKEY_INTERVAL_MS = 1_800_000L
+        // SCTP send buffer watermark — back off when bufferedAmount exceeds this
+        // to avoid stalling the reliable delivery path. 256 KB is a typical good
+        // value for low-RTT paths; higher RTT may benefit from 512 KB.
+        private const val BUFFERED_HIGH_WATERMARK = 256 * 1024L
 
         @Volatile private var factoryInitialized = false
         private lateinit var factory: PeerConnectionFactory
@@ -170,6 +176,10 @@ class WebRtcTunnel(
                 }
                 override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
                     Log.d(TAG, "pc: ice=$state")
+                    if (state == PeerConnection.IceConnectionState.CONNECTED ||
+                        state == PeerConnection.IceConnectionState.COMPLETED) {
+                        logSelectedIcePair()
+                    }
                     if (state == PeerConnection.IceConnectionState.FAILED ||
                         state == PeerConnection.IceConnectionState.DISCONNECTED) {
                         if (!dcOpen.isCompleted) dcOpen.completeExceptionally(RuntimeException("ice $state"))
@@ -327,26 +337,41 @@ class WebRtcTunnel(
             }
         }
 
-        // Keepalive + health
+        // Keepalive + periodic stats (incl. SCTP buffer state)
         val healthJob = launch {
             val rekeyDeadline = System.currentTimeMillis() + REKEY_INTERVAL_MS
+            var lastUp = 0L
+            var lastDown = 0L
+            var lastTs = System.currentTimeMillis()
+            var statCounter = 0
             while (isActive && !stopFlag.get()) {
-                delay(KEEPALIVE_INTERVAL_MS)
+                delay(5000L)
                 if (stopFlag.get()) break
                 if (System.currentTimeMillis() >= rekeyDeadline) {
                     Log.d(TAG, "rekey interval — reconnect")
                     break
                 }
-                val ka = crypto.buildKeepalivePacket()
-                if (!sendDataChannel(ka)) {
-                    Log.w(TAG, "keepalive: dc send failed")
-                    break
+                // Keepalive every 15s
+                statCounter++
+                if (statCounter % 3 == 0) {
+                    val ka = crypto.buildKeepalivePacket()
+                    if (!sendDataChannel(ka)) {
+                        Log.w(TAG, "keepalive: dc send failed")
+                        break
+                    }
+                    keepaliveSent.incrementAndGet()
                 }
-                val n = keepaliveSent.incrementAndGet()
-                if (n % 4 == 0L) {
-                    val ms = System.currentTimeMillis() - tunStart
-                    Log.d(TAG, "keepalive #$n (uptime ${ms / 1000}s, up=${uploadBytes.get()}B down=${downloadBytes.get()}B)")
-                }
+                // STATS every 5s — throughput + SCTP buffer + ICE pair
+                val now = System.currentTimeMillis()
+                val up = uploadBytes.get(); val down = downloadBytes.get()
+                val gap = (now - lastTs).coerceAtLeast(1)
+                val upBps = (up - lastUp) * 1000 / gap
+                val downBps = (down - lastDown) * 1000 / gap
+                val buffered = dc?.bufferedAmount() ?: -1
+                val uptime = (now - tunStart) / 1000
+                Log.d(TAG, "STATS t=${uptime}s: up=${upBps}B/s down=${downBps}B/s buffered=${buffered}B keepalives=${keepaliveSent.get()}")
+                lastUp = up; lastDown = down; lastTs = now
+                if (statCounter % 6 == 0) logSelectedIcePair()  // every 30s log ICE pair (RTT changes)
             }
         }
 
@@ -405,12 +430,55 @@ class WebRtcTunnel(
 
     private fun sendDataChannel(bytes: ByteArray): Boolean {
         val channel = dc ?: return false
+        // Basic backpressure — if the SCTP send buffer is too full we'd be
+        // dropped or throttled unpredictably. Pause briefly until it drains.
+        var spins = 0
+        while (channel.bufferedAmount() > BUFFERED_HIGH_WATERMARK && !stopFlag.get()) {
+            Thread.sleep(5)
+            if (++spins > 400) {  // 2 seconds
+                Log.w(TAG, "dc send: stalled, bufferedAmount=${channel.bufferedAmount()}")
+                return false
+            }
+        }
         return try {
             channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), true))
         } catch (e: Exception) {
             Log.w(TAG, "dc send exception: ${e.javaClass.simpleName}: ${e.message}")
             false
         }
+    }
+
+    /** Query PeerConnection stats for the nominated ICE pair + local candidate type. */
+    private fun logSelectedIcePair() {
+        val peer = pc ?: return
+        peer.getStats(RTCStatsCollectorCallback { report: RTCStatsReport ->
+            val stats = report.statsMap
+            var nominatedPair: org.webrtc.RTCStats? = null
+            for ((_, s) in stats) {
+                if (s.type == "candidate-pair") {
+                    val nominated = s.members["nominated"] as? Boolean ?: false
+                    val state = s.members["state"] as? String
+                    if (nominated && (state == "succeeded" || state == "in-progress")) {
+                        nominatedPair = s
+                        break
+                    }
+                }
+            }
+            val pair = nominatedPair
+            if (pair == null) {
+                Log.d(TAG, "ice-pair: no nominated pair yet")
+                return@RTCStatsCollectorCallback
+            }
+            val localId = pair.members["localCandidateId"] as? String
+            val remoteId = pair.members["remoteCandidateId"] as? String
+            val localType = localId?.let { stats[it]?.members?.get("candidateType") as? String } ?: "?"
+            val localAddr = localId?.let { stats[it]?.members?.get("ip") as? String } ?: "?"
+            val localProto = localId?.let { stats[it]?.members?.get("protocol") as? String } ?: "?"
+            val remoteType = remoteId?.let { stats[it]?.members?.get("candidateType") as? String } ?: "?"
+            val remoteAddr = remoteId?.let { stats[it]?.members?.get("ip") as? String } ?: "?"
+            val rtt = pair.members["currentRoundTripTime"]
+            Log.i(TAG, "ICE pair: local[$localType $localProto $localAddr] ↔ remote[$remoteType $remoteAddr] rtt=${rtt}s")
+        })
     }
 
     private suspend fun createOfferSuspend(pc: PeerConnection): SessionDescription =
