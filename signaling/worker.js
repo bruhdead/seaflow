@@ -6,26 +6,21 @@
 // a tunnel). Messages (SDP offer/answer, ICE candidates) are forwarded
 // verbatim between the two.
 //
-// Deployment: paste this whole file into Cloudflare Workers as a single
-// Worker using Durable Object binding named "ROOM".
-//
-// Protocol (client side):
-//   ws wss://<worker>.workers.dev/ws?role=server&room=<ROOM_ID>
-//   ws wss://<worker>.workers.dev/ws?role=client&room=<ROOM_ID>
+// Protocol:
+//   wss://<worker>.workers.dev/ws?role=server&room=<ROOM_ID>
+//   wss://<worker>.workers.dev/ws?role=client&room=<ROOM_ID>
 //
 //   Both endpoints send/receive JSON messages:
 //     { "type": "offer",  "sdp":  "<sdp-text>" }
 //     { "type": "answer", "sdp":  "<sdp-text>" }
 //     { "type": "ice",    "candidate": {...} }
 //     { "type": "bye" }
-//
-// Room ID is an opaque shared secret between the VPN server and its clients.
-// Anyone who knows the ID can impersonate either side, but all actual VPN
-// crypto happens inside the DataChannel, so Worker never sees plaintext.
 
-export class RoomObject {
-  constructor(state) {
-    this.state = state
+import { DurableObject } from "cloudflare:workers"
+
+export class RoomObject extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env)
     this.server = null
     this.client = null
   }
@@ -52,7 +47,7 @@ export class RoomObject {
   handleSession(ws, role) {
     ws.accept()
 
-    // Evict previous session with the same role (reconnects).
+    // Evict previous session with the same role (supports reconnects).
     const old = role === "server" ? this.server : this.client
     if (old) {
       try { old.close(1000, "replaced") } catch (_) {}
@@ -66,7 +61,7 @@ export class RoomObject {
       try {
         other.send(event.data)
       } catch (_) {
-        // other side gone; drop
+        // other side gone; drop silently
       }
     })
 
