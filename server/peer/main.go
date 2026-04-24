@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -58,6 +59,8 @@ type session struct {
 	upstream *net.UDPConn
 	done     chan struct{}
 	once     sync.Once
+	dcRx     atomic.Uint64
+	dcTx     atomic.Uint64
 }
 
 func (s *session) close() {
@@ -319,6 +322,11 @@ func (s *session) bridge(dc *webrtc.DataChannel, upstreamAddr string) {
 		if _, err := upstream.Write(msg.Data); err != nil {
 			log.Printf("bridge: upstream write: %v", err)
 			s.close()
+			return
+		}
+		n := s.dcRx.Add(uint64(len(msg.Data)))
+		if n < 4096 || n%(1<<20) < uint64(len(msg.Data)) {
+			log.Printf("bridge: dc→udp %d bytes (total dcRx=%d)", len(msg.Data), n)
 		}
 	})
 	dc.OnClose(func() { s.close() })
@@ -352,6 +360,10 @@ func (s *session) bridge(dc *webrtc.DataChannel, upstreamAddr string) {
 				log.Printf("bridge: dc send: %v", err)
 				s.close()
 				return
+			}
+			total := s.dcTx.Add(uint64(n))
+			if total < 4096 || total%(1<<20) < uint64(n) {
+				log.Printf("bridge: udp→dc %d bytes (total dcTx=%d)", n, total)
 			}
 		}
 	}()
