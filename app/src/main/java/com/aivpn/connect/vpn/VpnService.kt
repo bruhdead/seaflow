@@ -177,6 +177,17 @@ class VpnService : android.net.VpnService() {
             .setMtu(TUN_MTU)
             .setMetered(false)
 
+        // Exclude our own app from VPN routing so the signaling/WebRTC (or UDP)
+        // sockets we open don't recursively loop through the very tunnel we're
+        // establishing. UDP transport also relies on protect() but this is a
+        // stronger redundant guarantee — and it is *required* for WebRTC, whose
+        // internal libwebrtc sockets can't be individually protect()'ed.
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (e: Exception) {
+            Log.w(TAG, "addDisallowedApplication failed: ${e.message}")
+        }
+
         val pfd = builder.establish()
             ?: throw Exception("VPN permission revoked")
 

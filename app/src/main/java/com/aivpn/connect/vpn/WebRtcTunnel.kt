@@ -252,7 +252,13 @@ class WebRtcTunnel(
 
             // 7. Forward loop on DataChannel
             return runForwardingLoop(tunFile)
+        } catch (e: TimeoutCancellationException) {
+            // Timeouts aren't deliberate stops — propagate as tunnel error so
+            // VpnService retries with backoff instead of reporting a clean exit.
+            Log.e(TAG, "WebRtcTunnel timeout: ${e.message}")
+            return e.message ?: "timeout"
         } catch (e: CancellationException) {
+            Log.d(TAG, "WebRtcTunnel cancelled (deliberate stop)")
             return ""
         } catch (e: Exception) {
             Log.e(TAG, "WebRtcTunnel error: ${e.javaClass.simpleName}: ${e.message}", e)
