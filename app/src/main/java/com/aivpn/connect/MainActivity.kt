@@ -20,6 +20,8 @@ import com.aivpn.connect.ui.AivpnConnectTheme
 import com.aivpn.connect.ui.LogsScreen
 import com.aivpn.connect.ui.VpnScreen
 import com.aivpn.connect.ui.VpnUiState
+import com.aivpn.connect.util.CrashLogger
+import com.aivpn.connect.util.DiagnosticsPrefs
 import com.aivpn.connect.vpn.VpnService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -50,6 +52,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 1. Install crash handler as early as possible so any subsequent uncaught
+        //    exception gets persisted before the process dies.
+        CrashLogger.install(this)
+
+        // 2. App-start diagnostic breadcrumb so post-kill silences in the previous
+        //    session are easy to spot in LOGS.
+        logAppStartSnapshot()
 
         // Crypto self-test
         CryptoSelfTest.runAll()
@@ -134,6 +144,28 @@ class MainActivity : ComponentActivity() {
 
         // Refresh battery-optimization exemption state (may have changed in Settings)
         uiState = uiState.copy(needsBatteryExemption = !isBatteryExempted())
+    }
+
+    private fun logAppStartSnapshot() {
+        val (lastEndMs, lastReason) = DiagnosticsPrefs.readLastSessionEnd(this)
+        val gapSec = if (lastEndMs > 0) (System.currentTimeMillis() - lastEndMs) / 1000 else -1
+        val exempted = isBatteryExempted()
+        val dozeIdle = try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) pm.isDeviceIdleMode else false
+        } catch (_: Exception) { false }
+        val lastTransport = DiagnosticsPrefs.lastTransport(this) ?: "unknown"
+        val running = VpnService.isRunning
+
+        Log.i(TAG, "App start: VpnService.isRunning=$running, lastSessionEnd=${if (gapSec < 0) "never" else "${gapSec}s ago ($lastReason)"}, battery_exempted=$exempted, doze_idle=$dozeIdle, last_transport=$lastTransport")
+
+        val crash = DiagnosticsPrefs.consumeLastCrash(this)
+        if (crash != null) {
+            val (ts, trace) = crash
+            val ago = (System.currentTimeMillis() - ts) / 1000
+            Log.e(TAG, "Previous session crashed ${ago}s ago — trace follows:")
+            trace.lines().take(20).forEach { Log.e(TAG, "  $it") }
+        }
     }
 
     private fun isBatteryExempted(): Boolean {

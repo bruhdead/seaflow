@@ -191,7 +191,8 @@ class KotlinTunnel(
         val rebindCount = AtomicLong(0L)
         val tunStart = System.currentTimeMillis()
 
-        // TUN reader
+        // TUN reader — tracks channel backpressure so a slow sender becomes visible in STATS.
+        val tunBackpressure = AtomicLong(0L)
         val tunReaderJob = launch(Dispatchers.IO) {
             val buf = ByteArray(BUF_SIZE)
             Log.d(TAG, "TUN reader started")
@@ -200,9 +201,19 @@ class KotlinTunnel(
                     val n = Os.read(tunFd, buf, 0, buf.size)
                     if (n <= 0) continue
                     if (buf[0].toInt().ushr(4) != 4) continue
-                    tunChannel.send(buf.copyOf(n))
+                    val pkt = buf.copyOf(n)
+                    val fast = tunChannel.trySend(pkt)
+                    if (!fast.isSuccess) {
+                        // Channel full — sender can't keep up. Fall back to suspending send so
+                        // we don't drop app traffic, but record the incident.
+                        val count = tunBackpressure.incrementAndGet()
+                        if (count == 1L || count % 100 == 0L) {
+                            Log.w(TAG, "TUN backpressure: channel full ($count incidents)")
+                        }
+                        tunChannel.send(pkt)
+                    }
                 }
-                Log.w(TAG, "TUN reader loop exited: active=$isActive stop=${stopFlag.get()}")
+                Log.w(TAG, "TUN reader loop exited: active=$isActive stop=${stopFlag.get()} backpressure=${tunBackpressure.get()}")
             } catch (e: Exception) {
                 Log.e(TAG, "TUN reader error after ${(System.currentTimeMillis() - tunStart) / 1000}s: ${e.javaClass.simpleName}: ${e.message}")
             }
@@ -333,7 +344,9 @@ class KotlinTunnel(
                     val upDelta = uploadBytes.get() - lastUpBytes
                     val downDelta = downloadBytes.get() - lastDownBytes
                     val gapMs = nowMs - lastStatsMs
-                    Log.d(TAG, "STATS t=${upSec}s: up=${upDelta}B (${upDelta * 1000 / gapMs}B/s) down=${downDelta}B (${downDelta * 1000 / gapMs}B/s) rxSilence=${silenceMs}ms")
+                    val bp = tunBackpressure.get()
+                    val bpSuffix = if (bp > 0) " backpressure=$bp" else ""
+                    Log.d(TAG, "STATS t=${upSec}s: up=${upDelta}B (${upDelta * 1000 / gapMs}B/s) down=${downDelta}B (${downDelta * 1000 / gapMs}B/s) rxSilence=${silenceMs}ms$bpSuffix")
                     lastStatsMs = nowMs
                     lastUpBytes = uploadBytes.get()
                     lastDownBytes = downloadBytes.get()
@@ -357,7 +370,7 @@ class KotlinTunnel(
             healthJob.onJoin { "health" }
         }
         val uptimeSec = (System.currentTimeMillis() - tunStart) / 1000
-        Log.w(TAG, "Tunnel exit after ${uptimeSec}s: $exitReason finished first (keepalives=${keepaliveSent.get()}, rebinds=${rebindCount.get()}, up=${uploadBytes.get()}B down=${downloadBytes.get()}B)")
+        Log.w(TAG, "Tunnel exit after ${uptimeSec}s: $exitReason finished first (keepalives=${keepaliveSent.get()}, rebinds=${rebindCount.get()}, backpressure=${tunBackpressure.get()}, up=${uploadBytes.get()}B down=${downloadBytes.get()}B)")
 
         tunReaderJob.cancel()
         senderJob.cancel()

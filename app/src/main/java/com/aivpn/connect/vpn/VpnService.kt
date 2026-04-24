@@ -11,6 +11,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.PowerManager
+import com.aivpn.connect.util.DiagnosticsPrefs
 import com.aivpn.connect.util.Log
 import com.aivpn.connect.MainActivity
 import kotlinx.coroutines.*
@@ -213,7 +214,8 @@ class VpnService : android.net.VpnService() {
     }
 
     private fun stopTunnel() {
-        Log.d(TAG, "stopTunnel")
+        Log.d(TAG, "stopTunnel (manual)")
+        DiagnosticsPrefs.recordSessionEnd(this, "user stopTunnel")
         manualDisconnect = true
         unregisterNetworkCallback()
         tunnel?.stop()
@@ -231,11 +233,16 @@ class VpnService : android.net.VpnService() {
     }
 
     override fun onRevoke() {
+        // Fires when another VPN app takes over or the user disables our VPN via the
+        // system toggle. Default VpnService.onRevoke() would stopSelf() silently.
+        Log.w(TAG, "onRevoke() — VPN permission revoked (another VPN or system toggle)")
+        DiagnosticsPrefs.recordSessionEnd(this, "onRevoke")
         tunnel?.stop()
     }
 
     override fun onDestroy() {
         Log.d(TAG, "onDestroy")
+        DiagnosticsPrefs.recordSessionEnd(this, "onDestroy")
         manualDisconnect = true
         unregisterNetworkCallback()
         tunnel?.stop()
@@ -264,42 +271,49 @@ class VpnService : android.net.VpnService() {
                 val caps = cm.getNetworkCapabilities(network) ?: return
                 if (!isUsableUnderlyingNetwork(caps)) return
 
+                val transport = transportLabel(cm, network)
+                DiagnosticsPrefs.recordTransport(this@VpnService, transport)
+
                 // Only react to changes in the *default* (active) network.
                 // Android also fires onAvailable for secondary nets (e.g. WiFi appears
                 // while LTE stays default) — those must not tear down a working tunnel.
                 val activeDefault = cm.activeNetwork
                 if (activeDefault == null || activeDefault != network) {
-                    Log.d(TAG, "Underlying network available: $network (not current default $activeDefault) — ignoring")
+                    Log.d(TAG, "Underlying network available: $network [$transport] (not current default $activeDefault) — ignoring")
                     return
                 }
 
                 val previous = currentUnderlyingNetwork
+                val prevTransport = transportLabel(cm, previous)
                 currentUnderlyingNetwork = network
-                Log.d(TAG, "Underlying network available: $network (previous=$previous)")
+                Log.d(TAG, "Underlying network available: $network [$transport] (previous=$previous [$prevTransport])")
 
                 if (previous != null && previous != network && isRunning) {
                     val now = System.currentTimeMillis()
                     if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
-                        handleNetworkChange(network, "switched $previous → $network")
+                        handleNetworkChange(network, "switched [$prevTransport]→[$transport]")
                     }
                 }
             }
 
             override fun onLost(network: Network) {
-                Log.d(TAG, "Underlying network lost: $network")
+                val transport = transportLabel(cm, network)
+                Log.d(TAG, "Underlying network lost: $network [$transport]")
                 if (network == currentUnderlyingNetwork) {
                     currentUnderlyingNetwork = findUsableUnderlyingNetwork(cm)
                 }
                 val replacement = currentUnderlyingNetwork
+                val replTransport = transportLabel(cm, replacement)
                 if (replacement != null && isRunning) {
                     val now = System.currentTimeMillis()
                     if (now - lastNetworkEventAtMs >= NETWORK_EVENT_DEBOUNCE_MS) {
                         lastNetworkEventAtMs = now
-                        handleNetworkChange(replacement, "lost $network → $replacement")
+                        DiagnosticsPrefs.recordTransport(this@VpnService, replTransport)
+                        handleNetworkChange(replacement, "lost [$transport]→[$replTransport]")
                     }
                 } else if (replacement == null && isRunning) {
-                    Log.d(TAG, "No usable network after loss — stopping tunnel for fast reconnect")
+                    Log.d(TAG, "No usable network after loss [$transport] — stopping tunnel for fast reconnect")
                     networkTrigger = true
                     tunnel?.stop()
                 }
@@ -399,6 +413,23 @@ class VpnService : android.net.VpnService() {
     private fun isUsableUnderlyingNetwork(caps: NetworkCapabilities): Boolean {
         return !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    /**
+     * Human-readable transport label (WIFI/CELLULAR/ETHERNET/…) for logging &
+     * post-kill diagnostics. Returns "unknown" when caps are null.
+     */
+    private fun transportLabel(cm: ConnectivityManager, network: Network?): String {
+        if (network == null) return "none"
+        val caps = cm.getNetworkCapabilities(network) ?: return "unknown"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "BT"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+            else -> "OTHER"
+        }
     }
 
     // ──────────── Helpers ────────────
