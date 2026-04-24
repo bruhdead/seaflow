@@ -1,0 +1,18 @@
+[Unit]
+Description=Seaflow WebRTC peer (signaling ↔ UDP bridge to aivpn-server)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/seaflow-peer
+ExecStart=/opt/seaflow-peer/seaflow-peer -config /opt/seaflow-peer/config.json
+Restart=on-failure
+RestartSec=3
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

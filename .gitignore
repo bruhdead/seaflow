@@ -17,6 +17,11 @@ release.keystore
 signing/
 keystore.properties
 
+# Server peer config with TURN creds + signaling URL
+server/peer/config.json
+server/peer/seaflow-peer
+server/peer/seaflow-peer.exe
+
 # APK outputs (built artifacts — distribute via releases, not git)
 *.apk
 *.aab

@@ -1,0 +1,12 @@
+{
+  "signaling_url": "https://seaflow-signal.<account>.workers.dev",
+  "room_id": "<32-char-random-hex>",
+  "upstream_udp": "127.0.0.1:443",
+  "ice_servers": [
+    { "urls": ["stun:stun.relay.metered.ca:80"] },
+    { "urls": ["turn:global.relay.metered.ca:80"],                 "username": "<turn-user>", "credential": "<turn-pass>" },
+    { "urls": ["turn:global.relay.metered.ca:80?transport=tcp"],   "username": "<turn-user>", "credential": "<turn-pass>" },
+    { "urls": ["turn:global.relay.metered.ca:443"],                "username": "<turn-user>", "credential": "<turn-pass>" },
+    { "urls": ["turns:global.relay.metered.ca:443?transport=tcp"], "username": "<turn-user>", "credential": "<turn-pass>" }
+  ]
+}
