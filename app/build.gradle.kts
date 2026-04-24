@@ -19,8 +19,8 @@ android {
         applicationId = "com.aivpn.connect"
         minSdk = 28  // ChaCha20-Poly1305 requires API 28+
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.1.0"
     }
 
     signingConfigs {
@@ -72,4 +72,13 @@ dependencies {
 
     // Encrypted storage
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // WebRTC transport (DataChannel-based fallback when UDP is blocked by corporate DPI)
+    // Using webrtc-sdk fork of Google libwebrtc — last maintained version on Maven Central.
+    implementation("io.github.webrtc-sdk:android:125.6422.07")
+
+    // OkHttp for signaling WebSocket client
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // JSON (already used via org.json in Android, but add for consistency)
 }

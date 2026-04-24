@@ -25,6 +25,7 @@ import com.aivpn.connect.util.DiagnosticsPrefs
 import com.aivpn.connect.vpn.VpnService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
@@ -272,6 +273,11 @@ class MainActivity : ComponentActivity() {
             putExtra("server_key", parsed.serverKey)
             putExtra("psk", parsed.psk)
             putExtra("vpn_ip", parsed.vpnIp)
+            if (parsed.wrtcSignalingUrl != null) {
+                putExtra("wrtc_signaling", parsed.wrtcSignalingUrl)
+                putExtra("wrtc_room", parsed.wrtcRoomId)
+                putExtra("wrtc_ice_json", parsed.wrtcIceJson)
+            }
         }
         startForegroundService(intent)
         uiState = uiState.copy(connecting = true, statusText = "Connecting...")
@@ -280,16 +286,26 @@ class MainActivity : ComponentActivity() {
     // ──────────── Key parsing ────────────
 
     data class ParsedKey(
-        val server: String,
+        val server: String,                 // "IP:port" for UDP, "wrtc:<room>" for WebRTC
         val serverKey: ByteArray,
         val psk: ByteArray?,
         val vpnIp: String?,
+
+        // WebRTC-specific (non-null only for aivpn-wrtc:// keys)
+        val wrtcSignalingUrl: String? = null,
+        val wrtcRoomId: String? = null,
+        val wrtcIceJson: String? = null,    // JSONArray as string — passed to VpnService
     )
 
     private fun parseConnectionKey(key: String): ParsedKey? {
         val raw = key.trim()
-        val payload = if (raw.startsWith("aivpn://")) raw.removePrefix("aivpn://") else raw
-        Log.d(TAG, "parseKey: payload length=${payload.length}, starts='${payload.take(20)}...'")
+        val isWrtc = raw.startsWith("aivpn-wrtc://")
+        val payload = when {
+            isWrtc -> raw.removePrefix("aivpn-wrtc://")
+            raw.startsWith("aivpn://") -> raw.removePrefix("aivpn://")
+            else -> raw
+        }
+        Log.d(TAG, "parseKey: scheme=${if (isWrtc) "wrtc" else "udp"}, payload length=${payload.length}")
 
         val jsonBytes = flexBase64Decode(payload)
         if (jsonBytes == null) {
@@ -302,34 +318,49 @@ class MainActivity : ComponentActivity() {
 
         return try {
             val json = JSONObject(jsonStr)
-            val server = json.getString("s")
             val serverKeyB64 = json.getString("k")
             val pskB64 = json.optString("p", "")
             val vpnIp = json.optString("i", "")
-            Log.d(TAG, "parseKey: server=$server, k_len=${serverKeyB64.length}, p_len=${pskB64.length}")
 
-            val serverKey = flexBase64Decode(serverKeyB64)
-            if (serverKey == null) {
-                Log.w(TAG, "parseKey: base64 decode of server key failed: '$serverKeyB64'")
+            val serverKey = flexBase64Decode(serverKeyB64) ?: run {
+                Log.w(TAG, "parseKey: base64 decode of server key failed")
                 return null
             }
             val psk = if (pskB64.isNotEmpty()) {
-                val p = flexBase64Decode(pskB64)
-                if (p == null) Log.w(TAG, "parseKey: base64 decode of psk failed: '$pskB64'")
-                p
+                flexBase64Decode(pskB64).also {
+                    if (it == null) Log.w(TAG, "parseKey: base64 decode of psk failed")
+                }
             } else null
 
-            Log.d(TAG, "parseKey: serverKey.size=${serverKey.size}, psk.size=${psk?.size}")
             if (serverKey.size != 32) {
-                Log.w(TAG, "parseKey: serverKey size ${serverKey.size} != 32")
-                return null
+                Log.w(TAG, "parseKey: serverKey size ${serverKey.size} != 32"); return null
             }
             if (psk != null && psk.size != 32) {
-                Log.w(TAG, "parseKey: psk size ${psk.size} != 32")
-                return null
+                Log.w(TAG, "parseKey: psk size ${psk.size} != 32"); return null
             }
 
-            ParsedKey(server, serverKey, psk, vpnIp.ifEmpty { null })
+            if (isWrtc) {
+                val signaling = json.getString("sig")
+                val room = json.getString("r")
+                val iceArr = json.optJSONArray("ice") ?: JSONArray()
+                Log.d(TAG, "parseKey: wrtc sig=$signaling room=$room iceServers=${iceArr.length()}")
+                if (room.length < 16 || room.length > 128) {
+                    Log.w(TAG, "parseKey: wrtc room length ${room.length} out of [16,128]"); return null
+                }
+                ParsedKey(
+                    server = "wrtc:$room",
+                    serverKey = serverKey,
+                    psk = psk,
+                    vpnIp = vpnIp.ifEmpty { null },
+                    wrtcSignalingUrl = signaling,
+                    wrtcRoomId = room,
+                    wrtcIceJson = iceArr.toString(),
+                )
+            } else {
+                val server = json.getString("s")
+                Log.d(TAG, "parseKey: udp server=$server")
+                ParsedKey(server, serverKey, psk, vpnIp.ifEmpty { null })
+            }
         } catch (e: Exception) {
             Log.w(TAG, "parseKey: exception: ${e.message}")
             null

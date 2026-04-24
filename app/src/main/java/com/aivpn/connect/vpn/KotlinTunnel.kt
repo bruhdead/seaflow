@@ -32,7 +32,7 @@ class KotlinTunnel(
     private val serverPort: Int,
     private val serverKey: ByteArray,
     private val psk: ByteArray?,
-) {
+) : Tunnel {
     companion object {
         private const val TAG = "KotlinTunnel"
         private const val BUF_SIZE = 1500
@@ -48,18 +48,18 @@ class KotlinTunnel(
         private const val SOCKET_BUF_SIZE = 4 * 1024 * 1024
     }
 
-    val uploadBytes = AtomicLong(0L)
-    val downloadBytes = AtomicLong(0L)
+    override val uploadBytes = AtomicLong(0L)
+    override val downloadBytes = AtomicLong(0L)
 
     private val stopFlag = AtomicBoolean(false)
     private val udpSocketRef = AtomicReference<DatagramSocket?>(null)
 
     @Volatile var serverAddress: InetAddress? = null
         private set
-    @Volatile var tunnelReady: Boolean = false
+    @Volatile override var tunnelReady: Boolean = false
         private set
 
-    var onTunnelReady: ((String) -> Unit)? = null
+    override var onTunnelReady: ((String) -> Unit)? = null
 
     /**
      * Atomically swap the active UDP socket (soft-roam / WiFi↔LTE without rehandshake).
@@ -82,7 +82,7 @@ class KotlinTunnel(
      * Blocking suspend function — runs the full tunnel session.
      * Returns "" on clean rekey exit, error message on failure.
      */
-    suspend fun run(): String {
+    override suspend fun run(): String {
         val tunFd = makeTunFileDescriptor(this.tunFd)
         var socket: DatagramSocket? = null
 
@@ -132,7 +132,7 @@ class KotlinTunnel(
         }
     }
 
-    fun stop() {
+    override fun stop() {
         stopFlag.set(true)
         try { udpSocketRef.get()?.close() } catch (_: Exception) {}
     }

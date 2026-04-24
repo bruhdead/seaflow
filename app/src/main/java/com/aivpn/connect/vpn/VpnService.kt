@@ -44,7 +44,7 @@ class VpnService : android.net.VpnService() {
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var tunnel: KotlinTunnel? = null
+    private var tunnel: Tunnel? = null
     private var tunnelJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var manualDisconnect = false
@@ -55,11 +55,17 @@ class VpnService : android.net.VpnService() {
     @Volatile private var networkTrigger: Boolean = false
     @Volatile private var lastNetworkEventAtMs: Long = 0L
 
-    // Saved params for reconnect
+    // Saved params for reconnect — common
     private var server: String? = null
     private var serverKey: ByteArray? = null
     private var psk: ByteArray? = null
     private var vpnIp: String? = null
+
+    // Saved params for reconnect — WebRTC transport. When non-null, runOnce
+    // builds a WebRtcTunnel instead of a plain UDP KotlinTunnel.
+    private var wrtcSignalingUrl: String? = null
+    private var wrtcRoomId: String? = null
+    private var wrtcIceJson: String? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -77,6 +83,10 @@ class VpnService : android.net.VpnService() {
                 serverKey = k
                 psk = intent.getByteArrayExtra("psk")
                 vpnIp = intent.getStringExtra("vpn_ip")
+                // Optional WebRTC transport params (present for aivpn-wrtc:// keys)
+                wrtcSignalingUrl = intent.getStringExtra("wrtc_signaling")
+                wrtcRoomId = intent.getStringExtra("wrtc_room")
+                wrtcIceJson = intent.getStringExtra("wrtc_ice_json")
                 startTunnel()
             }
             ACTION_DISCONNECT -> stopTunnel()
@@ -178,7 +188,26 @@ class VpnService : android.net.VpnService() {
         statusCallback?.invoke(false, statusText)
         updateNotification(statusText)
 
-        val t = KotlinTunnel(this, tunFd, host, port, key, psk)
+        val t: Tunnel = if (wrtcSignalingUrl != null && wrtcRoomId != null) {
+            Log.d(TAG, "runOnce: WebRTC transport (signaling=${wrtcSignalingUrl}, room=${wrtcRoomId})")
+            val ice = try {
+                IceServerSpec.parseJsonArray(org.json.JSONArray(wrtcIceJson ?: "[]"))
+            } catch (e: Exception) {
+                Log.e(TAG, "runOnce: bad ICE JSON: ${e.message}"); emptyList()
+            }
+            WebRtcTunnel(
+                vpnService = this,
+                tunFd = tunFd,
+                serverKey = key,
+                psk = psk,
+                signalingUrl = wrtcSignalingUrl!!,
+                roomId = wrtcRoomId!!,
+                iceServers = ice,
+            )
+        } else {
+            Log.d(TAG, "runOnce: UDP transport ($host:$port)")
+            KotlinTunnel(this, tunFd, host, port, key, psk)
+        }
         t.onTunnelReady = { h ->
             isRunning = true
             statusText = "Connected to $h"
@@ -201,11 +230,12 @@ class VpnService : android.net.VpnService() {
         try {
             val error = t.run()
             val dur = (System.currentTimeMillis() - runStart) / 1000
+            val transportName = if (t is WebRtcTunnel) "WebRtcTunnel" else "KotlinTunnel"
             if (error.isNotEmpty()) {
-                Log.e(TAG, "KotlinTunnel.run() returned error after ${dur}s: $error")
+                Log.e(TAG, "$transportName.run() returned error after ${dur}s: $error")
                 throw RuntimeException(error)
             }
-            Log.d(TAG, "KotlinTunnel.run() returned cleanly after ${dur}s")
+            Log.d(TAG, "$transportName.run() returned cleanly after ${dur}s")
         } finally {
             tunnel = null
             statsJob.cancel()
@@ -347,6 +377,16 @@ class VpnService : android.net.VpnService() {
         val t = tunnel
         if (t == null) {
             Log.d(TAG, "Network change ($reason): no tunnel instance, ignoring")
+            return
+        }
+        // Soft-roam is a UDP-only optimization (rebinds the DatagramSocket to the new
+        // underlying network). WebRTC handles roaming internally via ICE restart, so
+        // for WebRtcTunnel we just do a full restart which is cheap (PC reconnects
+        // in 1–3 s through TURN).
+        if (t !is KotlinTunnel) {
+            Log.d(TAG, "Network change ($reason) for non-UDP tunnel — full restart (ICE will reselect)")
+            networkTrigger = true
+            t.stop()
             return
         }
         if (!t.tunnelReady) {
