@@ -40,3 +40,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# PC client artifacts (shipped via GitHub Releases)
+seaflow-pc-*.zip
