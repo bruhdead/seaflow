@@ -19,8 +19,8 @@ android {
         applicationId = "com.aivpn.connect"
         minSdk = 28  // ChaCha20-Poly1305 requires API 28+
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.1.3"
+        versionCode = 9
+        versionName = "1.1.4"
     }
 
     signingConfigs {

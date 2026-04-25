@@ -72,6 +72,15 @@ class AivpnCrypto(private val serverStaticPub: ByteArray, private val psk: ByteA
     // only run it at most once per 500ms to prevent CPU stalls during packet-loss bursts.
     @Volatile private var lastWideSearchMs: Long = 0L
 
+    // Tag-generation cache — pure-Kotlin BLAKE3 keyed-hash is the dominant CPU
+    // cost in tryDecryptPacket (3072+ hashes per failed packet across the whole
+    // narrow window × 3 time offsets). For each (counter, timeWindow) the tag is
+    // deterministic, so cache it. Cleared on rekey (when tagSecret rotates) and
+    // when the timeWindow rolls over (every 10 s).
+    private val tagCache = HashMap<Long, ByteArray>(4096)
+    private var tagCacheTimeWin: Long = Long.MIN_VALUE
+
+
     init {
         // Generate ephemeral X25519 keypair using platform API
         val kpg = KeyPairGenerator.getInstance("X25519")
@@ -187,6 +196,8 @@ class AivpnCrypto(private val serverStaticPub: ByteArray, private val psk: ByteA
 
             // Ratchet keys: derive new keys using DH2 + current session key as PSK
             deriveKeys(dh2, clientPublic, sessionKey)
+            // tagSecret has rotated — drop cached tags from the old epoch.
+            clearTagCacheOnKeyChange()
 
             // Reset counters for the new epoch
             sendCounter = 0
@@ -236,8 +247,17 @@ class AivpnCrypto(private val serverStaticPub: ByteArray, private val psk: ByteA
         var validCounter: Long? = null
         val timeWindow = System.currentTimeMillis() / 10_000L
 
-        // Phase 1: narrow fast-path search around the known window
-        val narrowStart = if (highest < 0L) 0L else maxOf(0L, highest - 63L)
+        // Phase 1: narrow fast-path search around the known window.
+        //
+        // Backward range was 64 packets; that holds against jitter but breaks down
+        // under burst-reordering common on shared WiFi and cellular HARQ paths.
+        // At 370 pkts/s (≈3.7 Mbps), a single 200-300 ms burst can dump 100+
+        // packets out-of-order; once `highest` has advanced past their counters
+        // by more than 64, narrow search misses them and they are silently
+        // dropped. Bump backward range to 1023 (~2.7 s of traffic at the above
+        // rate) — still bounded so wide forward-recovery isn't required for the
+        // common case.
+        val narrowStart = if (highest < 0L) 0L else maxOf(0L, highest - 1023L)
         val narrowEnd = maxOf(256L, highest + 257L)
         for (offset in longArrayOf(0, -1, 1)) {
             val tw = timeWindow + offset
@@ -383,7 +403,20 @@ class AivpnCrypto(private val serverStaticPub: ByteArray, private val psk: ByteA
     }
 
     private fun generateTag(secret: ByteArray, counter: Long, timeWindow: Long): ByteArray {
-        // BLAKE3 keyed hash: matches Rust generate_resonance_tag
+        // Cache hot-path. We cache only for the *current* tagSecret AND the
+        // current 10-s timeWindow. Grace-period decrypts (oldTagSecret) and
+        // ±1 offset probes (timeWindow±1) bypass the cache so the steady-state
+        // cache doesn't thrash between three timeWindows on every packet.
+        val nowWindow = System.currentTimeMillis() / 10_000L
+        val cacheable = (secret === tagSecret) && (timeWindow == nowWindow)
+        if (cacheable) {
+            if (timeWindow != tagCacheTimeWin) {
+                tagCache.clear()
+                tagCacheTimeWin = timeWindow
+            }
+            tagCache[counter]?.let { return it }
+        }
+
         val counterBytes = ByteArray(8)
         val windowBytes = ByteArray(8)
         for (i in 0 until 8) {
@@ -391,7 +424,14 @@ class AivpnCrypto(private val serverStaticPub: ByteArray, private val psk: ByteA
             windowBytes[i] = ((timeWindow shr (i * 8)) and 0xFF).toByte()
         }
         val data = counterBytes + windowBytes
-        return Blake3.keyedHash(secret, data).copyOf(TAG_SIZE)
+        val tag = Blake3.keyedHash(secret, data).copyOf(TAG_SIZE)
+        if (cacheable) tagCache[counter] = tag
+        return tag
+    }
+
+    private fun clearTagCacheOnKeyChange() {
+        tagCache.clear()
+        tagCacheTimeWin = Long.MIN_VALUE
     }
 
     private fun deriveKeys(sharedSecret: ByteArray, clientPub: ByteArray, psk: ByteArray? = null) {
