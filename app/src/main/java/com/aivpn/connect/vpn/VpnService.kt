@@ -129,8 +129,10 @@ class VpnService : android.net.VpnService() {
                     runOnce()
                     val dur = (System.currentTimeMillis() - attemptStart) / 1000
                     Log.d(TAG, "Tunnel attempt #$attempt ended cleanly after ${dur}s (rekey or network change)")
-                    // Network-triggered or clean exit — reconnect immediately
-                    retryDelay = if (wasNetworkTriggered || networkTrigger) 0L else 500L
+                    // Network-triggered or clean exit — reconnect quickly but not immediately;
+                    // 0L would poison the doubling formula below (0*2 = 0) and turn future
+                    // failure backoff into a tight CPU-burning loop.
+                    retryDelay = if (wasNetworkTriggered || networkTrigger) 200L else 500L
                 } catch (e: CancellationException) {
                     val dur = (System.currentTimeMillis() - attemptStart) / 1000
                     Log.w(TAG, "Tunnel attempt #$attempt cancelled after ${dur}s")
@@ -144,10 +146,13 @@ class VpnService : android.net.VpnService() {
                     updateNotification(statusText)
                     if (manualDisconnect) break
 
-                    // Network-triggered errors → reconnect immediately; otherwise exponential backoff
-                    val delayMs = if (networkTrigger) 0L else retryDelay
+                    // Network-triggered errors → reconnect quickly; otherwise exponential backoff.
+                    // coerceIn floor guards against retryDelay being stuck at 0 (which would
+                    // make the doubling no-op and reduce backoff to a 0-ms tight loop).
+                    val delayMs = if (networkTrigger) 200L else retryDelay
                     if (delayMs > 0) delay(delayMs)
-                    retryDelay = if (networkTrigger) 500L else (retryDelay * 2).coerceAtMost(8000L)
+                    retryDelay = if (networkTrigger) 500L
+                                 else (retryDelay * 2).coerceIn(500L, 15_000L)
                 }
             }
             // Exited loop
