@@ -372,12 +372,29 @@ class KotlinTunnel(
         val uptimeSec = (System.currentTimeMillis() - tunStart) / 1000
         Log.w(TAG, "Tunnel exit after ${uptimeSec}s: $exitReason finished first (keepalives=${keepaliveSent.get()}, rebinds=${rebindCount.get()}, backpressure=${tunBackpressure.get()}, up=${uploadBytes.get()}B down=${downloadBytes.get()}B)")
 
+        // Force-close the UDP socket so any other coroutine still blocked in
+        // socket.receive() / socket.send() (native syscalls don't respect coroutine
+        // cancellation) wakes up immediately. Without this, the receiver hung for
+        // 30+ seconds in field logs after sender errored out on ENETUNREACH.
+        try { udpSocketRef.getAndSet(null)?.close() } catch (_: Exception) {}
+
         tunReaderJob.cancel()
         senderJob.cancel()
         receiverJob.cancel()
         healthJob.cancel()
 
-        return@coroutineScope if (stopFlag.get()) "Tunnel stopped by request" else ""
+        // Map exit reason to a result string so VpnService can distinguish
+        // "clean exit, immediate reconnect" (rekey window, manual stop) from
+        // "transport-level failure, apply backoff" (sender/receiver/tunReader
+        // exited unexpectedly — likely network gone).
+        return@coroutineScope when {
+            stopFlag.get() -> "Tunnel stopped by request"
+            exitReason == "health"    -> ""  // rekey deadline → fast reconnect
+            exitReason == "sender"    -> "sender exited (${exitReason})"
+            exitReason == "receiver"  -> "receiver exited (${exitReason})"
+            exitReason == "tunReader" -> "TUN reader exited (${exitReason})"
+            else -> ""
+        }
     }
 
     // ──────────── Helpers ────────────
