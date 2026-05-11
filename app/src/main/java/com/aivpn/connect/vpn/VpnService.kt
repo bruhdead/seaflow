@@ -347,7 +347,7 @@ class VpnService : android.net.VpnService() {
                 val transport = transportLabel(cm, network)
                 Log.d(TAG, "Underlying network lost: $network [$transport]")
                 if (network == currentUnderlyingNetwork) {
-                    currentUnderlyingNetwork = findUsableUnderlyingNetwork(cm)
+                    currentUnderlyingNetwork = findUsableUnderlyingNetwork(cm, exclude = network)
                 }
                 val replacement = currentUnderlyingNetwork
                 val replTransport = transportLabel(cm, replacement)
@@ -458,9 +458,23 @@ class VpnService : android.net.VpnService() {
         currentUnderlyingNetwork = null
     }
 
-    private fun findUsableUnderlyingNetwork(cm: ConnectivityManager): Network? {
+    private fun findUsableUnderlyingNetwork(cm: ConnectivityManager, exclude: Network? = null): Network? {
+        // Prefer the OS-chosen active default — it's already the network that
+        // would be used for new sockets. Fall back to scanning allNetworks if
+        // the OS hasn't picked one yet, or the active network is the one we
+        // were just told is being lost.
+        val active = cm.activeNetwork
+        if (active != null && active != exclude) {
+            val caps = cm.getNetworkCapabilities(active)
+            if (caps != null && isUsableUnderlyingNetwork(caps)) return active
+        }
+        // Field logs showed that immediately after onLost(N), N still appears
+        // in allNetworks for several seconds. Soft-roam picked it back up,
+        // bound a fresh socket to it, and got ENETUNREACH from the kernel.
+        // Caller passes `exclude` = just-lost network to avoid that trap.
         @Suppress("DEPRECATION")
         return cm.allNetworks.firstOrNull { net ->
+            if (net == exclude) return@firstOrNull false
             val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
             isUsableUnderlyingNetwork(caps)
         }

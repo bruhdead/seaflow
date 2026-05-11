@@ -1,6 +1,8 @@
 package com.aivpn.connect.vpn
 
 import com.aivpn.connect.crypto.AivpnCrypto
+import android.content.Context
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.system.Os
 import com.aivpn.connect.util.Log
@@ -98,10 +100,32 @@ class KotlinTunnel(
             } ?: return "Cannot resolve $serverHost to IPv4"
             serverAddress = resolved
 
-            // 3. Create & protect UDP socket
+            // 3. Create, bind, protect UDP socket.
+            //
+            // bindSocket() pins the kernel-side socket to a specific underlying
+            // Network so that subsequent send()/recv() always uses that
+            // interface, even if Android later picks a different default. This
+            // is the matched pair of protect() and handleNetworkChange's
+            // rebindSocket() path: every socket we ever create is bound to a
+            // known Network, and migration between networks goes through an
+            // explicit rebind. Without this pin, the kernel resolved
+            // out-interface at connect() time using the default route — which
+            // could be a network that has only just appeared (e.g. WIFI came up
+            // during/just-after handshake on CELLULAR) and silently swallow our
+            // outbound traffic.
             socket = DatagramSocket()
             udpSocketRef.set(socket)
             vpnService.protect(socket)
+            val initialNetwork = (vpnService.getSystemService(Context.CONNECTIVITY_SERVICE)
+                as? ConnectivityManager)?.activeNetwork
+            if (initialNetwork != null) {
+                try {
+                    initialNetwork.bindSocket(socket)
+                    Log.d(TAG, "UDP socket bound to network $initialNetwork")
+                } catch (e: Exception) {
+                    Log.w(TAG, "bindSocket($initialNetwork) failed: ${e.message}")
+                }
+            }
             socket.connect(InetSocketAddress(resolved, serverPort))
             socket.sendBufferSize = SOCKET_BUF_SIZE
             socket.receiveBufferSize = SOCKET_BUF_SIZE
